@@ -11,11 +11,13 @@ import traceback
 
 FIFTEEN_MIN_IN_MICROSECONDS = 15 * 60 * 1000000
 STOP_LOSS = 0.25
-TARGET = 4.75
+TARGET = 4.50
 WINDOW_IDX = 0
 WINDOW = FIFTEEN_MIN_IN_MICROSECONDS * (WINDOW_IDX + 1)
-BUY_PERCENTILE_IDX = 28
-SELL_PERCENTILE_IDX = 17
+BUY_PERCENTILE_IDX = 19
+SELL_PERCENTILE_IDX = 16
+BUY_DELTA_PERCENTILE_IDX = 19
+SELL_DELTA_PERCENTILE_IDX = 9
 ENTRY_THRESHOLD = 0.35
 
 COINBASE_WEBSOCKET_ARN = "arn:aws:sns:us-east-2:471112880949:coinbase-websocket-notifications"
@@ -47,6 +49,7 @@ ETH_PORT = 12346
 # 30th percentile to 95th percentile in increments of 5 percentiles
 buyVolPercentiles = []
 sellVolPercentiles = []
+deltaVolPercentiles = []
 
 with open("buyPercentilesDollarsBTC", "r") as f:
 	for line in f:
@@ -60,6 +63,12 @@ with open("sellPercentilesDollarsBTC", "r") as f:
 		data[-1] = data[-1][:-1]
 		sellVolPercentiles.append([float(x) for x in data])
 
+with open("deltaPercentilesDollarsBTC", "r") as f:
+	for line in f:
+		data = line.split(" ")
+		data[-1] = data[-1][:-1]
+		deltaVolPercentiles.append([float(x) for x in data])
+
 precomputedTarget = 1 + TARGET * 0.01
 precomputedStopLoss = 1 - STOP_LOSS * 0.01
 precomputedLongEntryThreshold = 1 + ENTRY_THRESHOLD * 0.01
@@ -67,6 +76,8 @@ precomputedShortEntryThreshold = 1 - ENTRY_THRESHOLD * 0.01
 
 buyVolPercentile = buyVolPercentiles[WINDOW_IDX][BUY_PERCENTILE_IDX]
 sellVolPercentile = sellVolPercentiles[WINDOW_IDX][SELL_PERCENTILE_IDX]
+buyVolDeltaPercentile = deltaVolPercentiles[WINDOW_IDX][BUY_DELTA_PERCENTILE_IDX]
+sellVolDeltaPercentile = deltaVolPercentiles[WINDOW_IDX][SELL_DELTA_PERCENTILE_IDX]
 
 def publishAndPrintError(error, subject):
 	errorMessage = repr(error) + " encountered for " + symbol + " at " + str(time.strftime("%H:%M:%S", time.localtime()))
@@ -116,6 +127,7 @@ def isSocketActive(sock):
 timeWindow = 0
 buyVol = 0
 sellVol = 0
+deltaVol = 0
 trades = []
 entry = []
 increasing = False
@@ -133,8 +145,9 @@ def assessTrade(trade):
 
 	price = trade['price']
 	microseconds = trade['time']
-	dayRemainder = microseconds % MICROSECONDS_IN_DAY + isDST(microseconds) * MICROSECONDS_IN_HOUR
-	weekRemainder = microseconds % MICROSECONDS_IN_WEEK + isDST(microseconds) * MICROSECONDS_IN_HOUR
+	isDSTInt = isDST(microseconds)
+	dayRemainder = microseconds % MICROSECONDS_IN_DAY + isDSTInt * MICROSECONDS_IN_HOUR
+	weekRemainder = microseconds % MICROSECONDS_IN_WEEK + isDSTInt * MICROSECONDS_IN_HOUR
 	inClose = dayRemainder >= CME_CLOSE and dayRemainder < CME_OPEN
 	onWeekend = weekRemainder >= CME_CLOSE_FRIDAY and weekRemainder < CME_OPEN_SUNDAY
 
@@ -186,12 +199,12 @@ def assessTrade(trade):
 			postAndHandleError("Trade Notifications", data)
 	'''
 	if not entry and not inClose and not onWeekend:
-		if buyVol >= buyVolPercentile:
+		if buyVol >= buyVolPercentile and deltaVol >= buyVolDeltaPercentile:
 			entry = [True, price, microseconds, trade['tradeId']]
 			data = '%s: Long entry at %.2f, target = %.2f, stop loss = %.2f (%s)' % (symbol, price, price * precomputedTarget, price * precomputedStopLoss, str(datetime.datetime.now(datetime.timezone.utc)))
 			print(data)
 			postAndHandleError("Trade Notifications", data)
-		elif sellVol >= sellVolPercentile:
+		elif sellVol >= sellVolPercentile and deltaVol <= sellVolDeltaPercentile:
 			entry = [False, price, microseconds, trade['tradeId']]
 			data = '%s: Short entry at %.2f, target = %.2f, stop loss = %.2f (%s)' % (symbol, price, price * (2 - precomputedTarget), price * (2 - precomputedStopLoss), str(datetime.datetime.now(datetime.timezone.utc)))
 			print(data)
@@ -199,7 +212,7 @@ def assessTrade(trade):
 
 def processTrade(trade):
 	# print(trade)
-	global timeWindow, buyVol, sellVol, maxPrice, minPrice, increasing
+	global timeWindow, buyVol, sellVol, deltaVol, maxPrice, minPrice, increasing
 
 	# print("before: %f, %f" % (buyVol, sellVol))
 	trades.append(trade)
@@ -221,6 +234,7 @@ def processTrade(trade):
 		buyVol += trade['size'] * trade['price']
 	else:
 		sellVol += trade['size'] * trade['price']
+	deltaVol = buyVol - sellVol
 	# print("after: %f, %f" % (buyVol, sellVol))
 
 	price = trade['price']
