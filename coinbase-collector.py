@@ -326,13 +326,15 @@ def handleGap(response, trades, lastTrade, windows):
 		windowOffset = computeOffset(windows)
 
 		while True:
-			while (retVal := getGap(endId, min(startTime + windowOffset, endTime), trades, startTime, lastTrade, missedTrades, log, windows, lastResponse)) == RetVal.WAIT:
+			endRequestTime = min(startTime + windowOffset, endTime)
+			isEndOfRange = endRequestTime >= endTime
+			while (retVal := getGap(endId, endRequestTime, trades, startTime, isEndOfRange, lastTrade, missedTrades, log, windows, lastResponse)) == RetVal.WAIT:
 				# Rate limit is 30 requests per second
 				time.sleep(1 / 5)
 
 			if retVal == RetVal.FAILURE:
 				break
-			if retVal == RetVal.SUCCESS and startTime + windowOffset >= endTime or endId == int(lastTrade['tradeId']) + 1:
+			if retVal == RetVal.SUCCESS and isEndOfRange or endId == int(lastTrade['tradeId']) + 1:
 				break
 
 			if retVal == RetVal.GAP_EXCEEDED:
@@ -361,7 +363,7 @@ def handleGap(response, trades, lastTrade, windows):
 			errMsg += "\n".join(log)
 			publishAndPrintError(RuntimeError(errMsg), "Requests")
 
-def getGap(endId, endTime, trades, startTime, lastTrade, missedTrades, log, windows, lastResponse):
+def getGap(endId, endTime, trades, startTime, isEndOfRange, lastTrade, missedTrades, log, windows, lastResponse):
 	url = "https://api.coinbase.com/api/v3/brokerage/products/%s/ticker" % (symbol)
 	params = {"limit": MAX_REST_API_TRADES, "start": str(startTime), "end": str(endTime)}
 	jwt_uri = jwt_generator.format_jwt_uri("GET", "/api/v3/brokerage/products/%s/ticker" % (symbol))
@@ -381,14 +383,16 @@ def getGap(endId, endTime, trades, startTime, lastTrade, missedTrades, log, wind
 			logMsg = "HTTP response contains 0 trades"
 			print(logMsg)
 			log.append(logMsg)
-			return RetVal.SUCCESS
+			if not isEndOfRange:
+				return RetVal.SUCCESS
 
 		cleanTrades(responseTrades)
 		if not responseTrades:
 			logMsg = "HTTP response contains 0 trades (after cleaning)"
 			print(logMsg)
 			log.append(logMsg)
-			return RetVal.SUCCESS
+			if not isEndOfRange:
+				return RetVal.SUCCESS
 
 		logMsg = "HTTP response contains %d trades (%s) (%s - %s)" % (len(responseTrades), ", ".join(getRanges(responseTrades)), responseTrades[0]['time'], responseTrades[-1]['time'])
 		print(logMsg)
@@ -396,7 +400,10 @@ def getGap(endId, endTime, trades, startTime, lastTrade, missedTrades, log, wind
 		# print(responseTrades)
 
 		tradeId = int(lastTrade['tradeId']) + 1
-		idx = next((i for i, x in enumerate(responseTrades) if int(x['trade_id']) >= tradeId), -1)
+		if len(responseTrades) == 0:
+			idx = -1
+		else:
+			idx = next((i for i, x in enumerate(responseTrades) if int(x['trade_id']) >= tradeId), -1)
 		if idx != -1:
 			formattedDate = dateutil.parser.isoparse(responseTrades[idx]['time'])
 			seconds = int(datetime.datetime.timestamp(formattedDate))
@@ -412,7 +419,10 @@ def getGap(endId, endTime, trades, startTime, lastTrade, missedTrades, log, wind
 		# 	return RetVal.SUCCESS
 
 		while (tradeId < endId):
-			idx = next((i for i, x in enumerate(responseTrades) if int(x['trade_id']) == tradeId), -1)
+			if len(responseTrades) == 0:
+				idx = -1
+			else:
+				idx = next((i for i, x in enumerate(responseTrades) if int(x['trade_id']) == tradeId), -1)
 			if (idx != -1):
 				record = prepareRecord(responseTrades[idx])
 				data = json.dumps(prepareTrade(responseTrades[idx]))
